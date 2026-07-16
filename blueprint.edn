@@ -1,0 +1,60 @@
+{:itonami.blueprint/id "cloud-itonami-isic-0128"
+ :itonami.blueprint/name "Growing Of Spices, Aromatic, Drug And Pharmaceutical Crops Coordination"
+ :itonami.blueprint/isic-rev5 "0128"
+ :itonami.blueprint/domain :agriculture/spice-aromatic-drug-pharmaceutical-crop-cultivation
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:rural-livelihoods :farm-labor-efficiency :diversion-control-compliance]
+ :itonami.blueprint/governor :spice-crop-governor
+ :itonami.blueprint/robotics false
+ :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :telemetry]
+ :itonami.blueprint/optional-technologies []
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented
+ :itonami.blueprint/implemented-slice
+ "`:spice-crop-governor` is implemented end-to-end in `src/spicecrop` as a
+ SPICE/AROMATIC/DRUG-AND-PHARMACEUTICAL-CROP FARM OPERATIONS COORDINATION
+ actor -- SpiceCrop Advisor (LLM proposal-only) ⊣ Spice/Aromatic/Drug-and-
+ Pharmaceutical-Crop Operations Governor (closed-op-allowlist / farm-lot-
+ registration-before-any-action hard-gate / cultivation-license-expiry-
+ quota-tracking-lapse-harvest-quota-exceeded hard-gates / unresolved-
+ compliance-flag hard-gate / cultivation-license-approval-renewal-or-
+ diversion-control-clearance-finalization permanent block).
+ `:itonami.blueprint/robotics` is honestly `false` -- this actor holds NO
+ authority to grant, renew, or finalize any controlled-substance
+ cultivation license or diversion-control-compliance clearance (a HARD,
+ permanent governor block, never overridable by human approval -- see
+ `spicecrop.governor` ns docstring). ISIC Rev.5 0128 covers BOTH entirely
+ mundane spice/aromatic crops (black pepper, vanilla, cinnamon,
+ peppermint) AND licit drug/pharmaceutical-precursor crop cultivation
+ (illustrative controlled crop categories chosen for this build: licensed
+ opium poppy for pharmaceutical morphine production, licensed coca leaf
+ for pharmaceutical/traditional use in the few jurisdictions where this
+ is legal, licensed medicinal cannabis) -- all grown and OWNED by the
+ operator, who already holds an independently-verified/registered farm-
+ lot record this actor only checks, never issues. Every one of its four
+ proposal ops (`:log-harvest-record` / `:schedule-farm-operation` /
+ `:flag-compliance-concern` / `:coordinate-supply-order`) carries
+ `:effect :propose` ONLY -- the governor HARD-holds any proposal that
+ doesn't (`effect-not-propose-violations`). Crop categories split into
+ non-controlled (black pepper, vanilla, cinnamon, peppermint -- no
+ cultivation-license or quota-tracking requirement at all) and controlled
+ substance crops (licensed opium poppy, licensed coca leaf, licensed
+ medicinal cannabis -- a genuine cultivation-license expiry, quota-
+ tracking reconciliation freshness, and licensed-quota ceiling) -- the
+ Governor's controlled-crop-specific checks are skipped entirely, never
+ fabricated, for non-controlled crop categories. `:flag-compliance-
+ concern` always escalates to a human, at every phase, and is
+ deliberately absent from every phase's `phase-auto-ops` auto-commit set;
+ `:coordinate-supply-order` above a cost threshold likewise always
+ escalates. A dedicated regression test
+ (`spicecrop.governor-test/default-mock-proposals-never-self-trip-scope-
+ exclusion-test`) asserts the advisor's own default happy-path proposals
+ -- whose rationale text deliberately contains the words \"license\",
+ \"clearance\", and \"diversion\" as ordinary compliance disclaimer
+ language -- never self-trip the
+ `:cultivation-license-or-diversion-clearance-blocked` rule, because that
+ rule is phrased as the finalization ACTION (explicit `:finalize-*?`
+ boolean `:value` flags) and never scans `:rationale` text. This build
+ ships NO JVM-only interop anywhere in `src/` (all source is `.cljc`) per
+ this workspace's cljs-first runtime-priority rule. See `README.md` for
+ the full governor-check enumeration."}
