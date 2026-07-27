@@ -269,6 +269,31 @@
       (is (true? (:escalate? result)))
       (is (false? (:hard? result)))))
 
+
+;; ──────────── The threshold gate must not read the number it doubts ────────────
+
+(deftest threshold-gate-fails-safe-when-the-value-is-unverifiable
+  (testing "`(some-> v (> threshold))` returned nil when `cost-usd` was ABSENT,
+            so a proposal carrying no figure at all skipped the gate entirely"
+    (let [store {:farm-lots {"lot-001" clean-poppy-lot}}
+          req {:op :coordinate-supply-order :subject "lot-001"}
+          prop {:cites [{:spec "Supplier-Catalog"}]
+                :value {:jurisdiction :jp/maff}
+                :confidence 0.99}
+          result (governor/check req {:actor-id "gov-1"} prop store)]
+      (is (false? (:ok? result)))
+      (is (true? (:escalate? result)))))
+
+  (testing "a non-numeric figure escalates rather than being compared"
+    (doseq [bad ["10000" :unknown {}]]
+      (let [store {:farm-lots {"lot-001" clean-poppy-lot}}
+            req {:op :coordinate-supply-order :subject "lot-001"}
+            prop {:cites [{:spec "Supplier-Catalog"}]
+                  :value {:jurisdiction :jp/maff :cost-usd bad}
+                  :confidence 0.99}
+            result (governor/check req {:actor-id "gov-1"} prop store)]
+        (is (false? (:ok? result))
+            (str "non-numeric " (pr-str bad) " must escalate, not slip through"))))))
   (testing "a supply order at or below the cost threshold does not force escalation"
     (let [store {:farm-lots {"lot-002" clean-poppy-lot}}
           req {:op :coordinate-supply-order :subject "lot-002"}
