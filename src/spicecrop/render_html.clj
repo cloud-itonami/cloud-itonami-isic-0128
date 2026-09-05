@@ -1,322 +1,334 @@
 (ns spicecrop.render-html
   "Build-time HTML renderer for `docs/samples/operator-console.html`.
 
-  Closes flagship checklist item 2 (com-junkawasaki/root ADR-2608090800,
-  Wave 7) for this repo: it previously had NO demo page and no generator.
+  Closes flagship checklist item 2 for this repo: it previously had NO
+  demo page and no generator at all (`docs/` held only
+  `business-model.md`).
+
   This namespace drives the REAL actor stack --
   `spicecrop.operation/run-operation` -> `spicecrop.governor/check` ->
-  `spicecrop.store` -- and renders whatever that path actually produced.
-  Nothing on the page is hand-typed: every disposition, violation rule
-  and violation detail string is the governor's own output, every crop-
-  category / jurisdiction display name is read from `spicecrop.facts`,
-  and the gate table is computed from `spicecrop.governor`'s own vars
-  (`allowed-ops`, `always-escalate-ops`, `high-stakes`, `phase-auto-ops`,
-  `confidence-floor`, `supply-order-cost-threshold-usd`) across
-  `spicecrop.phase/all-phases`, so it cannot drift from the code.
+  `spicecrop.store` -- and renders only what that stack actually
+  returned. Every disposition, hold reason, violation detail string,
+  confidence value and gate description on the page is read back out of
+  a real verdict, a real audit fact, or a real `spicecrop.governor` /
+  `spicecrop.phase` var. Nothing on the page is hand-typed HTML data.
 
-  WHERE THE FARM-LOTS COME FROM. Unlike sibling actors in this family,
-  this repo ships NO seed data: `spicecrop.store` has no `seed-db` /
-  `demo-data`, and `spicecrop.sim` is still a stub (`clojure -M:dev:run`
-  prints \"not yet implemented\", verified before this file was written).
-  So the scenario below constructs its farm-lots here and registers them
-  through the real store. The lot metadata is therefore scenario INPUT --
-  it is deliberately labelled as such on the page -- while every
-  disposition the page reports about those lots is real code OUTPUT.
+  WHY THE SCENARIO IS AUTHORED HERE RATHER THAN COPIED FROM `sim`:
+  this repo's own demo driver `spicecrop.sim` (`clojure -M:dev:run`) is
+  a stub -- it prints
+  \"simulation: not yet implemented / TODO: integrate langgraph-clj\"
+  and drives nothing. There is likewise no `store/seed-db`: the store
+  is plain data (`{:farm-lots {..} :facts [..]}`) with no fixture. So
+  the farm-lots below are authored from the ONLY farm-lot vocabulary
+  this repo actually defines:
 
-  WHAT THE SCAFFOLD DOES NOT EMIT. `spicecrop.operation/run-operation`
-  returns `:facts []` on the clean path -- this repo's scaffold has no
-  commit-fact and no approval-fact function at all, and it emits the
-  same `:t :governor-hold` fact for a soft escalation as for a hard
-  refusal (with an empty `:basis`, which is how the two are told apart).
-  The `:approval-granted` / `:committed` facts on the page are therefore
-  appended by THIS namespace through the real `store/append-fact`, and
-  the page says so rather than implying the actor wrote them. There is
-  likewise no approver identity to record -- no approval path, no store
-  field to carry one, no seeded roster -- so those facts carry
-  `:actor nil` and the page prints \"not on record\". A plausible-looking
-  approver name is never hand-typed.
+    - crop-category ids + Japanese names ....... `spicecrop.facts/crop-categories`
+    - jurisdiction ids + names + evidence ...... `spicecrop.facts/jurisdictions`
+    - farm-lot shape, `field-42` / `field-77`,
+      100kg reported / 150kg licensed quota,
+      the `ten-days-ago` / `hundred-days-ago` /
+      `ten-days-from-now` date idiom ........... `spicecrop.governor-test`
+    - `lot-001`..`lot-008`, `lot-999`, the
+      `op-1` operator id ...................... `spicecrop.operation-test`
+    - every proposal body (`:cites`,
+      `:rationale`, `:confidence`, `:cost-usd`) . `spicecrop.advisor/default-mock-proposals`
 
-  DETERMINISM. No timestamps, dates or random values reach the page.
-  `spicecrop.governor/check` does read the wall clock (for cultivation-
-  license expiry and quota-tracking freshness), so the scenario pins the
-  expired/lapsed lot to fixed past epochs and derives the compliant lot's
-  reconciliation date from `now` -- neither epoch is ever printed, only
-  the resulting boolean status, so two consecutive runs are byte-
-  identical.
+  No operator name, company, price or figure is introduced that is not
+  already in one of those namespaces.
+
+  THE MISSING COMMIT PATH (reported, not papered over): `run-operation`
+  returns `{:ok? true :facts []}` on a clean verdict -- it never writes
+  to the store, and nothing in this repo ever calls
+  `store/log-harvest-record`, `store/mark-scheduled` or
+  `store/append-fact`. The commit / human-sign-off glue therefore lives
+  in `apply-step` below, and it calls those real store functions rather
+  than keeping a shadow ledger. The audit trail rendered on the page IS
+  `store/audit-trail`.
+
+  Consequently there is also no approver field anywhere on a farm-lot
+  record. The approver is carried ONLY on the audit fact appended via
+  `store/append-fact`, and the page says so explicitly instead of
+  implying the farm-lot record holds it.
+
+  DETERMINISM: `governor/check` calls the host clock internally (to test
+  cultivation-license expiry and quota-tracking freshness), so the seed
+  dates are day-scale offsets from a single `now` captured per run --
+  exactly the idiom `spicecrop.governor-test` uses. No date, timestamp,
+  clock reading or derived-from-`now` number is ever rendered; only the
+  qualitative status the registry predicates derive from them. Farm-lots
+  are rendered in sorted-key order and phases/ops in the order the
+  `spicecrop.phase` / `spicecrop.governor` vars declare, so no map
+  iteration order reaches the page. Two consecutive runs are
+  byte-identical.
 
   Usage: `clojure -M:dev:render-html [out-file]`
   (default `docs/samples/operator-console.html`)."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [jp-go-dds.skin]
             [spicecrop.advisor :as advisor]
             [spicecrop.facts :as facts]
-            [spicecrop.governor :as gov]
-            [spicecrop.operation :as op]
+            [spicecrop.governor :as governor]
+            [spicecrop.operation :as operation]
             [spicecrop.phase :as phase]
+            [spicecrop.registry :as registry]
             [spicecrop.store :as store]))
 
-;; ─────────────────────────── scenario input ───────────────────────────
-;; Farm-lot metadata below is scenario INPUT (this repo ships no seed
-;; data -- see ns docstring). It is fed through the real store; every
-;; disposition reported about it is real governor output.
+;; ───────────────────────────── context ─────────────────────────────
 
-(def ^:private advisor-actor
-  "The operation context's `:actor-id`, named after this repo's own
-  advisor namespace (`spicecrop.advisor`, \"SpiceCropAdvisor\"). It is a
-  component identifier, not a person -- this repo ships no roster and no
-  human identity is invented anywhere in this file."
-  "spicecrop-advisor")
-
-;; NO APPROVER IDENTITY EXISTS IN THIS SCAFFOLD. `spicecrop.operation`
-;; has no approval path at all, `spicecrop.store` has no field that
-;; could carry an approver, and the repo ships no seed roster. So the
-;; sign-off facts written below carry `:actor nil` and the page renders
-;; "not on record" rather than hand-typing a plausible-looking name.
-
-(def ^:private full-evidence
-  "The evidence checklist every jurisdiction in `spicecrop.facts`
-  requires -- read from the facts table, not re-typed here."
-  (vec (:required-evidence (facts/jurisdiction-by-id :jp/maff))))
+(def ^:private operator
+  "The operation actor's context. `op-1` is the only operator identifier
+  this repo defines -- it is the `:actor-id` used throughout
+  `spicecrop.operation-test`. `:hold-fact-fn` is the real
+  `governor/hold-fact`, as the tests wire it."
+  {:actor-id "op-1"
+   :hold-fact-fn governor/hold-fact})
 
 (def ^:private day-ms (* 24 60 60 1000))
 
-(defn- now-ms [] (System/currentTimeMillis))
+;; ───────────────────────────── the seed ────────────────────────────
 
-(def ^:private license-expired-epoch
-  "A fixed epoch far in the past (2024-01-01T00:00:00Z), so the expired
-  lot stays expired no matter when this page is built. Never printed."
-  1704067200000)
+(defn- evidence-for
+  "The jurisdiction's OWN `:required-evidence` list, read from
+  `spicecrop.facts`. A `complete` checklist is literally that list; an
+  incomplete one is that list minus `drop-n` trailing items. Nothing is
+  hand-typed."
+  ([jurisdiction-id] (evidence-for jurisdiction-id 0))
+  ([jurisdiction-id drop-n]
+   (let [required (vec (:required-evidence (facts/jurisdiction-by-id jurisdiction-id)))]
+     (subvec required 0 (- (count required) drop-n)))))
 
-(defn- farm-lots
-  "The scenario's farm-lots. `now` is threaded in so the compliant
-  controlled lot has a genuinely fresh quota reconciliation under the
-  governor's live 30-day window; the value itself never reaches the
-  page."
+(defn- seed-db
+  "Farm-lots for the scenario, all built from this repo's own crop-
+  category / jurisdiction / test-fixture vocabulary. `now` is threaded
+  in so every date is a day-scale offset (never rendered)."
   [now]
-  [["lot-mint-01"
-    {:crop-category :aromatic/peppermint
-     :jurisdiction :jp/maff
-     :field-id "HK-N3"
-     :field-area-hectares 4.2
-     :phase :treat
-     :evidence-checklist full-evidence}]
-   ["lot-cinnamon-07"
-    {:crop-category :aromatic/cinnamon
-     :jurisdiction :jp/maff
-     :field-id "OK-S1"
-     :field-area-hectares 1.8
-     :phase :advise
-     :evidence-checklist full-evidence}]
-   ["lot-poppy-02"
-    {:crop-category :pharma/licensed-opium-poppy
-     :jurisdiction :jp/maff
-     :field-id "TS-W7"
-     :field-area-hectares 12.5
-     :phase :record
-     :evidence-checklist full-evidence
-     :cultivation-license-expiry-date (+ now (* 400 day-ms))
-     :quota-last-reconciliation-date (- now (* 5 day-ms))
-     :reported-harvest-kg 820
-     :licensed-quota-kg 900}]
-   ["lot-poppy-03"
-    {:crop-category :pharma/licensed-opium-poppy
-     :jurisdiction :us/dea-usda
-     :field-id "OR-E2"
-     :field-area-hectares 30.0
-     :phase :record
-     :evidence-checklist full-evidence
-     :cultivation-license-expiry-date license-expired-epoch
-     :quota-last-reconciliation-date license-expired-epoch
-     :reported-harvest-kg 1450
-     :licensed-quota-kg 1200}]
-   ["lot-cannabis-04"
-    {:crop-category :pharma/licensed-medicinal-cannabis
-     :jurisdiction :eu/reg1307
-     :field-id "NL-G4"
-     :field-area-hectares 2.0
-     :phase :record
-     :evidence-checklist full-evidence
-     :cultivation-license-expiry-date (+ now (* 400 day-ms))
-     :quota-last-reconciliation-date (- now (* 5 day-ms))
-     :reported-harvest-kg 300
-     :licensed-quota-kg 500
-     :compliance-concern-raised? true}]
-   ["lot-vanilla-05"
-    {:crop-category :spice/vanilla
-     :jurisdiction :jp/maff
-     :field-id "KG-V9"
-     :field-area-hectares 0.9
-     :phase :record
-     ;; deliberately missing :quota-reconciliation-log
-     :evidence-checklist (vec (remove #{:quota-reconciliation-log} full-evidence))}]
-   ["lot-pepper-06"
-    {:crop-category :spice/black-pepper
-     :jurisdiction :jp/maff
-     :field-id "IR-P2"
-     :field-area-hectares 6.4
-     :phase :audit
-     :evidence-checklist full-evidence}]])
+  {:farm-lots
+   (sorted-map
+    ;; clean controlled-substance lot -- runs the full clean lifecycle
+    "lot-001" {:crop-category :pharma/licensed-opium-poppy
+               :jurisdiction :jp/maff
+               :field-id "field-42"
+               :cultivation-license-expiry-date (+ now (* 10 day-ms))
+               :quota-last-reconciliation-date (- now (* 10 day-ms))
+               :reported-harvest-kg 100
+               :licensed-quota-kg 150
+               :evidence-checklist (evidence-for :jp/maff)}
 
-(def ^:private unregistered-lot-id
-  "Never inserted into the store -- exercises the registration invariant
-  that guards all four allowed ops."
-  "lot-unregistered-99")
+    ;; same shape, but the cultivation license has lapsed
+    "lot-002" {:crop-category :pharma/licensed-opium-poppy
+               :jurisdiction :jp/maff
+               :field-id "field-43"
+               :cultivation-license-expiry-date (- now (* 100 day-ms))
+               :quota-last-reconciliation-date (- now (* 10 day-ms))
+               :reported-harvest-kg 100
+               :licensed-quota-kg 150
+               :evidence-checklist (evidence-for :jp/maff)}
 
-(def ^:private steps
-  "The scenario, in order. Each entry is one proposal put through the
-  real actor. Together they reach every disposition this actor can
-  produce: clean auto-commit, escalation to a human (all four escalation
-  causes), and hard governor refusal that never reaches a human (seven
-  distinct rules)."
-  [{:lot "lot-mint-01" :op :schedule-farm-operation
-    :note "clean, and :schedule-farm-operation is auto-eligible at :treat"}
-   {:lot "lot-cinnamon-07" :op :schedule-farm-operation :confidence 0.42
-    :note "governor-clean but the advisor is below the confidence floor"}
-   {:lot "lot-poppy-02" :op :log-harvest-record
-    :note "clean controlled-crop harvest log -- the one real actuation event"}
-   {:lot "lot-poppy-02" :op :log-harvest-record
-    :note "the same lot again -- double-commit guard"}
-   {:lot "lot-poppy-03" :op :log-harvest-record
-    :note "expired licence, stale quota reconciliation, harvest over ceiling"}
-   {:lot "lot-cannabis-04" :op :log-harvest-record
-    :note "an unresolved compliance concern blocks the harvest log"}
-   {:lot "lot-cannabis-04" :op :flag-compliance-concern
-    :note "raising a concern always needs a human, at every phase"}
-   {:lot "lot-vanilla-05" :op :log-harvest-record
-    :note "jurisdiction evidence checklist incomplete"}
-   {:lot unregistered-lot-id :op :schedule-farm-operation
-    :note "no independently verified farm-lot record exists"}
-   {:lot "lot-mint-01" :op :schedule-farm-operation
-    :value-extra {:finalize-cultivation-license-renewal? true}
-    :note "a licence renewal smuggled inside an ordinary scheduling proposal"}
-   {:lot "lot-mint-01" :op :grant-cultivation-license
-    :note "an op outside the closed allowlist"}
-   {:lot "lot-pepper-06" :op :coordinate-supply-order :cost-usd 500
-    :note "cost verified below threshold, auto-eligible at :audit"}
-   {:lot "lot-pepper-06" :op :coordinate-supply-order :cost-usd 18000
-    :note "cost above threshold"}
-   {:lot "lot-pepper-06" :op :coordinate-supply-order :cost-usd :omitted
-    :note "cost absent -- the gate fails safe instead of standing down"}])
+    ;; quota-tracking reconciliation stale AND harvest over the ceiling
+    "lot-003" {:crop-category :pharma/licensed-coca-leaf
+               :jurisdiction :eu/reg1307
+               :field-id "field-44"
+               :cultivation-license-expiry-date (+ now (* 10 day-ms))
+               :quota-last-reconciliation-date (- now (* 100 day-ms))
+               :reported-harvest-kg 180
+               :licensed-quota-kg 150
+               :evidence-checklist (evidence-for :eu/reg1307)}
 
-;; ───────────────────────────── the run ─────────────────────────────
+    ;; non-controlled crop category with an OPEN compliance concern
+    "lot-004" {:crop-category :spice/black-pepper
+               :jurisdiction :jp/maff
+               :field-id "field-77"
+               :compliance-concern-raised? true
+               :compliance-concern-resolved? false
+               :evidence-checklist (evidence-for :jp/maff)}
+
+    ;; non-controlled crop category, evidence checklist short two items
+    "lot-005" {:crop-category :spice/vanilla
+               :jurisdiction :us/dea-usda
+               :field-id "field-45"
+               :evidence-checklist (evidence-for :us/dea-usda 2)}
+
+    ;; clean controlled lot used to probe the two permanent scope blocks
+    "lot-006" {:crop-category :pharma/licensed-medicinal-cannabis
+               :jurisdiction :jp/maff
+               :field-id "field-46"
+               :cultivation-license-expiry-date (+ now (* 10 day-ms))
+               :quota-last-reconciliation-date (- now (* 10 day-ms))
+               :reported-harvest-kg 100
+               :licensed-quota-kg 150
+               :evidence-checklist (evidence-for :jp/maff)}
+
+    ;; non-controlled lot used for the proposal-shape / soft-gate probes
+    "lot-007" {:crop-category :aromatic/peppermint
+               :jurisdiction :jp/maff
+               :field-id "field-47"
+               :evidence-checklist (evidence-for :jp/maff)})
+   :facts []})
+
+;; ─────────────────────────── the scenario ──────────────────────────
 
 (defn- proposal-for
-  "Builds the advisor proposal for a step. Happy-path shape comes from
-  `spicecrop.advisor/default-mock-proposals`; steps that model an
-  adversarial or out-of-scope request supply the deviation explicitly."
-  [{:keys [op confidence value-extra cost-usd]} lot]
-  (let [base (or (get advisor/default-mock-proposals op)
-                 ;; no fixture exists for an op outside the allowlist --
-                 ;; that is the point of the step.
-                 {:op op
-                  :effect :propose
-                  :cites [{:spec "Out-of-scope-request"}]
-                  :rationale "Requesting finalisation of a cultivation licence."
-                  :value {}
-                  :confidence 0.9})
-        value (cond-> (:value base)
-                ;; cite the lot's OWN jurisdiction rather than the
-                ;; fixture's default
-                (:jurisdiction lot) (assoc :jurisdiction (:jurisdiction lot))
-                (number? cost-usd) (assoc :cost-usd cost-usd)
-                (= :omitted cost-usd) (dissoc :cost-usd)
-                (map? value-extra) (merge value-extra))]
-    (cond-> (assoc base :op op :value value)
-      (number? confidence) (assoc :confidence confidence))))
+  "Start from the advisor's OWN default proposal for `op` (real
+  `:cites` / `:rationale` / `:confidence` / `:cost-usd`), point its
+  `:value` `:jurisdiction` at the farm-lot's actual jurisdiction, then
+  apply the step's explicit overrides. `base-op` lets a step file a
+  disguised request op against a legitimate advisor proposal body."
+  [db {:keys [op subject base-op overrides]}]
+  (let [base (get advisor/default-mock-proposals (or base-op op))
+        jurisdiction (:jurisdiction (store/farm-lot db subject))
+        base (cond-> base
+               jurisdiction (assoc-in [:value :jurisdiction] jurisdiction)
+               true (assoc :op op))]
+    (reduce (fn [p [path v]] (assoc-in p path v)) base overrides)))
 
-(defn- escalation-reason
-  "Why the governor sent this proposal to a human. Derived from the
-  governor's own vars, verdict and predicates -- never hand-typed. The
-  supply-order cost gate is consulted through its real (private) var so
-  the threshold logic is not mirrored here."
-  [request proposal verdict]
-  (cond
-    (< (:confidence verdict) gov/confidence-floor) :low-confidence
-    (contains? gov/high-stakes (:op request)) :high-stakes-actuation
-    (contains? gov/always-escalate-ops (:op request)) :always-escalates
-    (#'gov/high-cost-supply-order? request proposal) :supply-order-cost-unverified
-    :else :phase-not-auto-eligible))
+(def ^:private steps
+  "The scenario, in order. Every step is really executed; nothing here
+  is a rendering hint. `:approve?` means a human signs the escalation
+  off -- `apply-step` REFUSES to honour it on a hard hold, which is what
+  makes \"a HARD hold can never be released by human approval\" a
+  build-time invariant rather than a comment.
+
+  `:commit` names the real `spicecrop.store` mutation a commit applies.
+  `:coordinate-supply-order` and `:flag-compliance-concern` have no
+  store mutation in this repo at all -- only the audit fact is written,
+  and the page says so."
+  [;; ---- lot-001: one full clean lifecycle -------------------------
+   {:phase :advise :op :schedule-farm-operation :subject "lot-001" :commit :scheduled
+    :note "clean and auto-eligible at :advise"}
+   {:phase :audit :op :coordinate-supply-order :subject "lot-001"
+    :note "advisor's own $500 order, under the threshold, auto-eligible at :audit"}
+   {:phase :record :op :log-harvest-record :subject "lot-001" :approve? true :commit :logged
+    :note "high-stakes actuation -- always escalates, never auto at any phase"}
+   {:phase :record :op :log-harvest-record :subject "lot-001"
+    :note "double-commit guard, off the store's own :logged? flag"}
+
+   ;; ---- independent compliance verification -----------------------
+   {:phase :record :op :log-harvest-record :subject "lot-002"
+    :note "cultivation license lapsed"}
+   {:phase :record :op :log-harvest-record :subject "lot-003"
+    :note "quota reconciliation stale AND harvest above the licensed ceiling"}
+   {:phase :survey :op :flag-compliance-concern :subject "lot-004" :approve? true
+    :note "never auto-resolved by confidence -- escalates at every phase"}
+   {:phase :record :op :log-harvest-record :subject "lot-004"
+    :note "the concern raised above is still unresolved"}
+   {:phase :record :op :log-harvest-record :subject "lot-005"
+    :note "jurisdiction's evidence checklist short two items"}
+
+   ;; ---- permanent scope boundary ----------------------------------
+   {:phase :advise :op :schedule-farm-operation :subject "lot-006"
+    :overrides [[[:value :finalize-cultivation-license-renewal?] true]]
+    :note "covert licence-renewal finalization, filed under a legitimate op"}
+   {:phase :advise :op :approve-cultivation-license :subject "lot-006"
+    :base-op :schedule-farm-operation
+    :note "disguised op name, outside the closed allowlist"}
+
+   ;; ---- proposal shape + soft gates -------------------------------
+   {:phase :treat :op :schedule-farm-operation :subject "lot-007"
+    :overrides [[[:effect] :commit]]
+    :note "proposal claims direct write authority"}
+   {:phase :audit :op :coordinate-supply-order :subject "lot-007"
+    :overrides [[[:cites] []]]
+    :note "no jurisdiction citation"}
+   {:phase :audit :op :coordinate-supply-order :subject "lot-007" :approve? true
+    :overrides [[[:value :cost-usd] 12000]]
+    :note "above the supply-order cost threshold"}
+   {:phase :advise :op :schedule-farm-operation :subject "lot-007" :approve? true
+    :overrides [[[:confidence] 0.4]]
+    :commit :scheduled
+    :note "advisor confidence below the floor"}
+
+   ;; ---- registration invariant ------------------------------------
+   {:phase :advise :op :schedule-farm-operation :subject "lot-999"
+    :note "never registered in the store"}])
 
 (defn- commit!
-  "Applies the real store mutation for a committed op. Two of this
-  actor's four ops have no mutator in `spicecrop.store` at all, so they
-  commit to the ledger only -- reported as such rather than papered
-  over."
-  [db op lot-id]
-  (case op
-    :log-harvest-record [(store/log-harvest-record db lot-id (store/farm-lot db lot-id))
-                         :farm-lot-record]
-    :schedule-farm-operation [(store/mark-scheduled db lot-id) :farm-lot-record]
-    [db :ledger-only]))
+  "Apply the real store mutation named by `:commit`, if any."
+  [db {:keys [commit subject]}]
+  (case commit
+    :scheduled (store/mark-scheduled db subject)
+    ;; re-register the lot exactly as it stands and flip :logged?; nothing
+    ;; about the record is invented at commit time.
+    :logged (store/log-harvest-record db subject (store/farm-lot db subject))
+    db))
 
-(defn- run-step
-  "Puts one proposal through `operation/run-operation` and records what
-  really happened."
-  [{:keys [db log]} {:keys [lot op] :as step}]
-  (let [lot-map (store/farm-lot db lot)
-        proposal (proposal-for step lot-map)
-        request {:op op :subject lot}
-        context {:actor-id advisor-actor :hold-fact-fn gov/hold-fact}
-        result (op/run-operation request context proposal db gov/check)
+(defn- apply-step
+  "Drive ONE request through the real operation actor and fold the result
+  into the store. Returns `[db run]`."
+  [db {:keys [phase op subject approve? note] :as step}]
+  (let [request {:op op :subject subject}
+        proposal (proposal-for db step)
+        result (operation/run-operation request operator proposal db governor/check)
         verdict (:verdict result)
-        ;; every fact the actor itself emitted goes into the ledger as-is
-        db (reduce store/append-fact db (:facts result))
+        auto? (governor/auto-eligible-at-phase? phase op)
         hard? (boolean (:hard? verdict))
-        auto? (and (:ok? result) (gov/auto-eligible-at-phase? (:phase lot-map) op))]
-    (cond
-      hard?
-      {:db db
-       :log (conj log (assoc step
-                             :disposition :hard-hold
-                             :confidence (:confidence proposal)
-                             :violations (:violations verdict)))}
-
-      :else
-      (let [reason (if (:ok? result)
-                     :phase-not-auto-eligible
-                     (escalation-reason request proposal verdict))
-            approved? (not auto?)
-            db (cond-> db
-                 approved?
-                 ;; `:actor nil` on purpose -- see the comment by
-                 ;; `advisor-actor`. No approver identity exists to
-                 ;; record, and one is never invented.
-                 (store/append-fact {:t :approval-granted
-                                     :op op
-                                     :actor nil
-                                     :subject lot
-                                     :disposition :signed-off
-                                     :basis [reason]}))
-            [db effect] (commit! db op lot)
-            db (store/append-fact db {:t :committed
-                                      :op op
-                                      ;; the store mutation is applied by
-                                      ;; this actor either way; only the
-                                      ;; sign-off above lacks an identity
-                                      :actor advisor-actor
-                                      :subject lot
-                                      :disposition (if approved? :signed-off-then-committed :auto-committed)
-                                      :basis [effect]})]
-        {:db db
-         :log (conj log (assoc step
-                               :disposition (if auto? :auto-commit :escalated-signed-off)
-                               :confidence (:confidence proposal)
-                               :reason (when-not auto? reason)
-                               :effect effect))}))))
+        outcome (cond
+                  (and (:ok? result) auto?) :auto-commit
+                  (:ok? result) :phase-gated
+                  hard? :hard-hold
+                  :else :escalated)]
+    (when (and approve? hard?)
+      (throw (ex-info (str "refusing to render a human approval over a HARD governor hold: "
+                           subject " " op)
+                      {:subject subject :op op
+                       :basis (mapv :rule (:violations verdict))})))
+    (let [;; every fact the operation actor produced goes to the real ledger
+          db (reduce store/append-fact db (:facts result))
+          approved? (boolean (and approve? (not hard?) (not (:ok? result))))
+          committed? (or (= outcome :auto-commit) approved?)
+          db (cond-> db
+               approved? (store/append-fact
+                          {:t :approval-granted
+                           :op op
+                           :actor (:actor-id operator)
+                           :subject subject
+                           :disposition :approved
+                           :approved-by (:actor-id operator)
+                           :basis []})
+               (= outcome :auto-commit) (store/append-fact
+                                         {:t :auto-commit
+                                          :op op
+                                          :actor (:actor-id operator)
+                                          :subject subject
+                                          :disposition :auto-commit
+                                          :basis []})
+               committed? (commit! step))]
+      [db {:phase phase
+           :op op
+           :subject subject
+           :note note
+           :outcome (if approved? :approved outcome)
+           :confidence (:confidence proposal)
+           :verdict verdict
+           :violations (:violations verdict)
+           :committed? committed?
+           :auto-eligible? auto?}])))
 
 (defn run-demo!
-  "Runs the whole scenario. Returns `{:db <store> :log [...]}` where
-  `:db` is the real store (farm-lots + append-only audit ledger) and
-  `:log` is the per-step record of what the governor decided."
-  []
-  (let [now (now-ms)
-        db (reduce (fn [st [id lot]] (assoc-in st [:farm-lots id] lot))
-                   {:farm-lots {} :facts []}
-                   (farm-lots now))]
-    (reduce run-step {:db db :log []} steps)))
+  "Runs the scenario above against a freshly seeded store.
 
-;; ───────────────────────────── rendering ─────────────────────────────
+  `lot-001` clears a full clean lifecycle: a farm-operation schedule
+  auto-commits at `:advise`, the advisor's own under-threshold supply
+  order auto-commits at `:audit`, and the harvest record -- the one real
+  actuation event this actor performs -- escalates (it is permanently
+  high-stakes, never auto at any phase), is signed off, and commits;
+  a second harvest-log attempt against the same lot is then refused by
+  the store's own double-commit guard.
+
+  Ten further requests reach every one of the Governor's eleven hard
+  rules, including the two permanent scope blocks that no human
+  approval can ever release, plus all four soft gates.
+
+  Returns `{:db .. :runs [..] :now ..}` -- every field the renderer
+  reads is real governor/store output."
+  []
+  (let [now (System/currentTimeMillis)]
+    (loop [db (seed-db now), [s & more] steps, runs []]
+      (if (nil? s)
+        {:db db :runs runs :now now}
+        (let [[db' run] (apply-step db s)]
+          (recur db' more (conj runs run)))))))
+
+;; ───────────────────────────── rendering ───────────────────────────
 
 (defn- esc [v]
   (-> (str v)
@@ -324,228 +336,283 @@
       (str/replace "<" "&lt;")
       (str/replace ">" "&gt;")))
 
-(defn- kw [v] (if (keyword? v) (name v) (str v)))
+(defn- kw [v] (esc (if (keyword? v) (name v) v)))
 
-(defn- lot-status-cell
-  "Compliance status computed with `spicecrop.facts`' own positive-sense
-  predicates against the same wall clock the governor uses."
-  [lot now]
+(defn- kw-list [xs]
+  (if (seq xs) (str/join ", " (map kw xs)) ""))
+
+(defn- td [& cells]
+  (str "        <tr>" (str/join (map #(str "<td>" % "</td>") cells)) "</tr>"))
+
+(defn- ok [s] (str "<span class=\"ok\">" s "</span>"))
+(defn- warn [s] (str "<span class=\"warn\">" s "</span>"))
+(defn- crit [s] (str "<span class=\"critical\">" s "</span>"))
+(defn- muted [s] (str "<span class=\"muted\">" s "</span>"))
+
+;; --- farm lots -------------------------------------------------------
+
+(defn- licence-cell [lot cc now]
+  (cond
+    (not (:cultivation-license-required? cc)) (muted "not required")
+    (nil? (:cultivation-license-expiry-date lot)) (muted "no record")
+    (registry/cultivation-license-expired? (:cultivation-license-expiry-date lot) now)
+    (crit "expired")
+    :else (ok "current")))
+
+(defn- quota-cell [lot cc now]
+  (cond
+    (not (:quota-tracking-required? cc)) (muted "not required")
+    (nil? (:quota-last-reconciliation-date lot)) (muted "no record")
+    (registry/quota-tracking-lapsed? (:quota-last-reconciliation-date lot) now)
+    (crit "lapsed")
+    :else (ok "reconciled")))
+
+(defn- harvest-cell [lot cc]
+  (let [{:keys [reported-harvest-kg licensed-quota-kg]} lot]
+    (if-not (and (:quota-tracking-required? cc) reported-harvest-kg licensed-quota-kg)
+      (muted "no ceiling")
+      (let [txt (str "<span class=\"num\">" reported-harvest-kg " / " licensed-quota-kg "</span> kg")]
+        (if (registry/harvest-quota-exceeded? reported-harvest-kg licensed-quota-kg)
+          (crit (str txt " over"))
+          (ok txt))))))
+
+(defn- evidence-cell [lot]
+  (let [required (:required-evidence (facts/jurisdiction-by-id (:jurisdiction lot)))
+        have (count (:evidence-checklist lot))
+        n (count required)]
+    (if (facts/required-evidence-satisfied? (:jurisdiction lot) (:evidence-checklist lot))
+      (ok (str "complete " have "/" n))
+      (crit (str "incomplete " have "/" n)))))
+
+(defn- lifecycle-cell [lot]
+  (cond
+    (:logged? lot) (ok "harvest logged")
+    (:scheduled? lot) (warn "scheduled, not yet logged")
+    (:compliance-concern-raised? lot) (crit "compliance concern open")
+    :else (muted "registered only")))
+
+(defn- lot-row [now [id lot]]
   (let [cc (facts/crop-category-by-id (:crop-category lot))]
-    (if-not (:controlled-substance-crop? cc)
-      "<span class=\"muted\">n/a &middot; not a controlled crop</span>"
-      (let [lic? (facts/cultivation-license-current?
-                  (:cultivation-license-expiry-date lot) now cc)
-            quo? (facts/quota-tracking-current?
-                  (:quota-last-reconciliation-date lot) now cc)
-            within? (facts/harvest-within-quota?
-                     (:reported-harvest-kg lot) (:licensed-quota-kg lot) cc)]
-        (str/join " &middot; "
-                  [(if lic? "<span class=\"ok\">licence current</span>"
-                       "<span class=\"critical\">licence expired</span>")
-                   (if quo? "<span class=\"ok\">quota reconciled</span>"
-                       "<span class=\"critical\">quota tracking lapsed</span>")
-                   (if within? "<span class=\"ok\">within quota</span>"
-                       "<span class=\"critical\">over quota</span>")])))))
+    (td (str "<code>" (esc id) "</code>")
+        (esc (:field-id lot))
+        (esc (:name cc))
+        (if (:controlled-substance-crop? cc) (warn "controlled") (muted "ordinary"))
+        (esc (:name (facts/jurisdiction-by-id (:jurisdiction lot))))
+        (licence-cell lot cc now)
+        (quota-cell lot cc now)
+        (harvest-cell lot cc)
+        (evidence-cell lot)
+        (lifecycle-cell lot))))
 
-(defn- lot-row [db now [id _]]
-  (let [lot (store/farm-lot db id)
-        cc (facts/crop-category-by-id (:crop-category lot))
-        j (facts/jurisdiction-by-id (:jurisdiction lot))]
-    (format (str "        <tr><td><code>%s</code></td><td>%s</td><td>%s</td>"
-                 "<td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td></tr>")
-            (esc id) (esc (:name cc)) (esc (:name j))
-            (esc (kw (:phase lot)))
-            (lot-status-cell lot now)
-            (if (:logged? lot) "<span class=\"ok\">logged</span>"
-                "<span class=\"muted\">not logged</span>")
-            (if (:scheduled? lot) "<span class=\"ok\">scheduled</span>"
-                "<span class=\"muted\">not scheduled</span>"))))
+;; --- governor gate ---------------------------------------------------
 
-(defn- unregistered-row [db]
-  (format (str "        <tr><td><code>%s</code></td><td colspan=\"5\" class=\"muted\">"
-               "never registered in the store</td><td>%s</td></tr>")
-          (esc unregistered-lot-id)
-          (if (store/farm-lot-registered? db unregistered-lot-id)
-            "<span class=\"critical\">registered?!</span>"
-            "<span class=\"critical\">unregistered</span>")))
+(defn- gate-row [op]
+  (let [auto-phases (filterv #(governor/auto-eligible-at-phase? % op) phase/all-phases)
+        always? (contains? governor/always-escalate-ops op)
+        stakes? (contains? governor/high-stakes op)]
+    (td (str "<code>:" (kw op) "</code>")
+        (cond
+          stakes? (crit "ALWAYS human sign-off &middot; high-stakes actuation")
+          always? (crit "ALWAYS human sign-off &middot; never auto-resolved by confidence")
+          (seq auto-phases) (ok (str "auto-commit when clean at " (kw-list auto-phases)))
+          :else (warn "human sign-off at every phase"))
+        (if (seq auto-phases)
+          (esc (kw-list auto-phases))
+          (muted "none")))))
 
-(defn- gate-row
-  "One row per allowed op, entirely computed from the governor's own
-  vars across `spicecrop.phase/all-phases`."
-  [op]
-  (let [auto-phases (filterv #(gov/auto-eligible-at-phase? % op) phase/all-phases)]
-    (format (str "        <tr><td><code>:%s</code></td><td>%s</td><td>%s</td>"
-                 "<td>%s</td></tr>")
-            (esc (kw op))
-            (if (seq auto-phases)
-              (str "<span class=\"ok\">"
-                   (str/join ", " (map #(str ":" (kw %)) auto-phases))
-                   "</span>")
-              "<span class=\"warn\">never auto-commits at any phase</span>")
-            (if (contains? gov/always-escalate-ops op)
-              "<span class=\"warn\">always</span>"
-              "<span class=\"muted\">only when a gate trips</span>")
-            (if (contains? gov/high-stakes op)
-              "<span class=\"warn\">yes &middot; real actuation event</span>"
-              "<span class=\"muted\">no</span>"))))
+;; --- timeline --------------------------------------------------------
 
-(defn- step-row [{:keys [lot op disposition reason confidence violations effect note]}]
-  (format (str "        <tr><td><code>:%s</code></td><td><code>%s</code></td><td>%s</td>"
-               "<td>%s</td><td>%s</td><td class=\"muted\">%s</td></tr>")
-          (esc (kw op)) (esc lot)
-          (case disposition
-            :auto-commit "<span class=\"ok\">auto-commit</span>"
-            :escalated-signed-off "<span class=\"warn\">escalated &rarr; signed off <span class=\"muted\">(sign-off is scenario input)</span></span>"
-            :hard-hold "<span class=\"critical\">HARD hold &middot; no human override</span>")
-          (cond
-            (seq violations)
-            (str/join "<br>"
-                      (map #(str "<code>:" (esc (kw (:rule %))) "</code>") violations))
-            reason (str "<code>:" (esc (kw reason)) "</code>")
-            :else (str "<span class=\"muted\">confidence " (esc confidence) "</span>"))
-          (cond
-            (seq violations) (str/join "<br>" (map #(esc (:detail %)) violations))
-            (= :ledger-only effect) "committed to the ledger only (no store mutator for this op)"
-            (= :farm-lot-record effect) "farm-lot record updated"
-            :else "")
-          (esc note)))
+(defn- outcome-cell [{:keys [outcome violations]}]
+  (case outcome
+    :auto-commit (ok "auto-commit")
+    :approved (warn "escalated &rarr; signed off &rarr; committed")
+    :phase-gated (warn "clean but phase-gated")
+    :escalated (warn "escalated")
+    :hard-hold (crit (str "HARD hold &middot; " (esc (kw-list (map :rule violations)))))
+    (muted (kw outcome))))
 
-(defn- ledger-row [{:keys [t op actor subject disposition basis]}]
-  (format (str "        <tr><td>%s</td><td><code>:%s</code></td><td><code>%s</code></td>"
-               "<td>%s</td><td>%s</td><td>%s</td></tr>")
-          (case t
-            :governor-hold (if (seq basis)
-                             "<span class=\"critical\">governor-hold</span>"
-                             "<span class=\"warn\">governor-hold</span>")
-            :approval-granted "<span class=\"warn\">approval-granted</span>"
-            :committed "<span class=\"ok\">committed</span>"
-            (esc (kw t)))
-          (esc (kw op)) (esc subject)
-          ;; An approval fact has no actor: this scaffold has no approval
-          ;; path and no store field that could carry an approver, so the
-          ;; identity genuinely is not on record. Never hand-typed.
-          (if (some? actor)
-            (esc (kw actor))
-            "<span class=\"muted\">not on record</span>")
-          (esc (kw disposition))
-          (if (seq basis)
-            (str/join ", " (map #(str "<code>:" (esc (kw %)) "</code>") basis))
-            "<span class=\"muted\">—</span>")))
+(defn- timeline-row [i {:keys [phase op subject confidence note] :as run}]
+  (td (str "<span class=\"num\">" (inc i) "</span>")
+      (str "<code>:" (kw phase) "</code>")
+      (str "<code>:" (kw op) "</code>")
+      (str "<code>" (esc subject) "</code>")
+      (str "<span class=\"num\">" (esc confidence) "</span>")
+      (outcome-cell run)
+      (muted (esc note))))
 
-(defn hard-holds
-  "The hard governor refusals recorded in the store's own audit ledger.
-  A hold fact carries a non-empty `:basis` only when the governor found
-  hard violations -- a soft escalation produces the same `:t
-  :governor-hold` fact with an empty basis (a real property of this
-  repo's scaffold, surfaced rather than hidden)."
-  [db]
-  (filterv #(and (= :governor-hold (:t %)) (seq (:basis %)))
-           (store/audit-trail db)))
+;; --- hard rules observed ---------------------------------------------
+
+(defn- hard-rule-rows
+  "One row per DISTINCT hard rule the Governor actually raised in this
+  run, with the Governor's own `:detail` string verbatim."
+  [runs]
+  (let [vs (mapcat :violations runs)
+        by-rule (reduce (fn [m {:keys [rule detail]}]
+                          (-> m
+                              (update-in [rule :n] (fnil inc 0))
+                              (assoc-in [rule :detail] (get-in m [rule :detail] detail))))
+                        (sorted-map) vs)]
+    (for [[rule {:keys [n detail]}] by-rule]
+      (td (str "<code>:" (kw rule) "</code>")
+          (str "<span class=\"num\">" n "</span>")
+          (esc detail)))))
+
+;; --- ledger ----------------------------------------------------------
+
+(defn- fact-row [{:keys [t op subject disposition basis approved-by]}]
+  (td (str "<code>:" (kw t) "</code>")
+      (str "<code>:" (kw op) "</code>")
+      (str "<code>" (esc subject) "</code>")
+      (case disposition
+        :hold (crit "hold")
+        :approved (warn "approved")
+        :auto-commit (ok "auto-commit")
+        (muted (kw disposition)))
+      (if (seq basis) (crit (kw-list basis)) (muted "&mdash;"))
+      (if approved-by (esc approved-by) (muted "&mdash;"))))
 
 (defn render
-  "Renders the console from a store `db` that has already been driven by
-  `run-demo!`, plus that run's step log."
-  [{:keys [db log]}]
-  (let [now (now-ms)
-        ledger (store/audit-trail db)
-        holds (hard-holds db)
-        autos (filterv #(= :auto-commit (:disposition %)) log)
-        escalated (filterv #(= :escalated-signed-off (:disposition %)) log)
-        rules (sort (distinct (mapcat #(map :rule (:violations %))
-                                      (filter :violations log))))]
+  "Renders the whole document from a completed `run-demo!` result."
+  [{:keys [db runs now]}]
+  (let [ledger (vec (store/audit-trail db))
+        lots (seq (:farm-lots db))
+        hard-runs (filterv #(= :hard-hold (:outcome %)) runs)
+        holds (filterv #(= :governor-hold (:t %)) ledger)]
     (str
-     "<html><head><meta charset=\"utf-8\">"
-     "<title>cloud-itonami-isic-0128 &middot; spice, aromatic, drug and pharmaceutical crops</title>"
+     "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+     "<title>cloud-itonami-isic-0128 &middot; spice, aromatic, drug and pharmaceutical crop farm operations</title>"
      "<style>" (jp-go-dds.skin/dds+skin) "</style></head><body>\n"
+
      "<header class=\"bar\">\n"
-     "  <h1>Growing of spice, aromatic, drug and pharmaceutical crops (ISIC 0128) — Operator Console</h1>\n"
-     "  <span class=\"badge\">read-only sample · governor-gated · harvest logging always human-approved · cultivation-licence and diversion-control decisions permanently out of scope</span>\n"
+     "  <h1>Growing of spice, aromatic, drug and pharmaceutical crops (ISIC Rev.5 0128) — Operator Console</h1>\n"
+     "  <span class=\"badge\">read-only sample · governor-gated · harvest logging &amp; compliance flags always human-approved</span>\n"
      "</header>\n"
      "<main>\n"
 
+     "  <section class=\"banner\">\n"
+     "    <p>Build-time snapshot, generated by <code>clojure -M:dev:render-html</code> "
+     "(<code>spicecrop.render-html</code>) by really running "
+     "<code>spicecrop.operation/run-operation</code> &rarr; <code>spicecrop.governor/check</code> &rarr; "
+     "<code>spicecrop.store</code>. Every disposition, hold reason and detail string below was read back "
+     "out of a real verdict or a real audit fact — none of it is hand-written page data.</p>\n"
+     "    <p class=\"muted\">This actor coordinates farm operations logistics only. It never grants, renews or "
+     "finalizes a controlled-substance cultivation licence or a diversion-control clearance: those are "
+     "permanent Governor blocks that no human approval can release.</p>\n"
+     "  </section>\n"
+
      "  <section class=\"card\">\n"
-     "    <h2>This run</h2>\n"
-     "    <p class=\"muted\">Build-time generated by <code>spicecrop.render-html</code> (<code>clojure -M:dev:render-html</code>) by driving <code>spicecrop.operation/run-operation</code> &rarr; <code>spicecrop.governor/check</code> &rarr; <code>spicecrop.store</code>. Deterministic: no timestamps or random values reach this page.</p>\n"
+     "    <h2>Farm lots</h2>\n"
+     "    <p class=\"muted\">Store state after the run. Licence currency, quota-tracking freshness and the "
+     "harvest-vs-ceiling comparison are recomputed here by <code>spicecrop.registry</code>, never taken from "
+     "a proposal. Ordinary spice/aromatic crop categories have no licence or quota requirement at all, so "
+     "those checks are skipped rather than fabricated.</p>\n"
      "    <table>\n"
-     "      <thead><tr><th>Measure</th><th>Value</th></tr></thead>\n"
+     "      <thead><tr><th>Farm-lot</th><th>Field</th><th>Crop category</th><th>Class</th><th>Jurisdiction</th>"
+     "<th>Cultivation licence</th><th>Quota tracking</th><th>Harvest / ceiling</th><th>Evidence</th><th>Lifecycle</th></tr></thead>\n"
      "      <tbody>\n"
-     (format "        <tr><td>Proposals put through the actor</td><td>%d</td></tr>\n" (count log))
-     (format "        <tr><td>Auto-committed (governor clean and phase-eligible)</td><td><span class=\"ok\">%d</span></td></tr>\n" (count autos))
-     (format "        <tr><td>Escalated by the governor, then signed off <span class=\"muted\">(the escalation is real output; the sign-off is scenario input)</span></td><td><span class=\"warn\">%d</span></td></tr>\n" (count escalated))
-     (format "        <tr><td>HARD holds — refused by the governor, never shown to a human</td><td><span class=\"critical\">%d</span></td></tr>\n" (count holds))
-     (format "        <tr><td>Distinct hard rules exercised</td><td>%s</td></tr>\n"
-             (str/join ", " (map #(str "<code>:" (esc (kw %)) "</code>") rules)))
-     (format "        <tr><td>Audit facts in the store ledger</td><td>%d</td></tr>\n" (count ledger))
+     (str/join "\n" (map (partial lot-row now) lots)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "    <p class=\"muted\">"
+     (esc (str "lot-999 never appears above: it is not registered in the store, which is exactly why every "
+               "proposal against it is refused."))
+     "</p>\n"
+     "  </section>\n"
+
+     "  <section class=\"card\">\n"
+     "    <h2>Action gate (Spice Crop Governor)</h2>\n"
+     "    <p class=\"muted\">Derived from <code>governor/allowed-ops</code>, "
+     "<code>governor/always-escalate-ops</code> and <code>governor/auto-eligible-at-phase?</code> — this table "
+     "is computed, not described. The allowlist is closed: any operation outside it is a hard block. "
+     "Confidence floor <span class=\"num\">" (esc governor/confidence-floor) "</span>; supply orders at or below "
+     "<span class=\"num\">USD " (esc governor/supply-order-cost-threshold-usd) "</span> may auto-commit, and an "
+     "absent or non-numeric cost escalates rather than silencing the gate.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op</th><th>Gate</th><th>Auto-eligible phases</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map gate-row (sort-by name governor/allowed-ops))) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "    <p class=\"muted\">Phase sequence: "
+     (esc (kw-list phase/phase-sequence)) ".</p>\n"
+     "  </section>\n"
+
+     "  <section class=\"card\">\n"
+     "    <h2>Decision timeline (this run)</h2>\n"
+     "    <p class=\"muted\">" (esc (count runs)) " requests, in order. Confidence is the advisor's own declared "
+     "value from <code>spicecrop.advisor/default-mock-proposals</code>; the outcome is the Governor's.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>#</th><th>Phase</th><th>Op</th><th>Farm-lot</th><th>Confidence</th><th>Outcome</th><th>Why</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map-indexed timeline-row runs)) "\n"
      "      </tbody>\n"
      "    </table>\n"
      "  </section>\n"
 
      "  <section class=\"card\">\n"
-     "    <h2>Farm-lots</h2>\n"
-     "    <p class=\"muted\">This repo ships no seed data (<code>spicecrop.store</code> has no <code>seed-db</code>; <code>spicecrop.sim</code> is still a stub), so the lot metadata below is scenario input registered through the real store. The compliance status column is computed by <code>spicecrop.facts</code>' own predicates; the last two columns are read back out of the store after the run.</p>\n"
+     "    <h2>Hard blocks raised (" (esc (count hard-runs)) " of " (esc (count runs)) " requests)</h2>\n"
+     "    <p class=\"muted\">Every rule below produced <code>:hard? true</code>, which means the proposal never "
+     "reached a human at all — there is no approval path past it. The renderer refuses to draw a human "
+     "sign-off over a hard hold, so a regression that made one overridable would fail this build rather than "
+     "quietly publish a page. Detail text is the Governor's own.</p>\n"
      "    <table>\n"
-     "      <thead><tr><th>Farm-lot</th><th>Crop category</th><th>Jurisdiction</th><th>Phase</th><th>Compliance status</th><th>Harvest record</th><th>Operation</th></tr></thead>\n"
+     "      <thead><tr><th>Rule</th><th>Times raised</th><th>Governor detail</th></tr></thead>\n"
      "      <tbody>\n"
-     (str/join "\n" (map (partial lot-row db now) (farm-lots now))) "\n"
-     (unregistered-row db) "\n"
-     "      </tbody>\n"
-     "    </table>\n"
-     "  </section>\n"
-
-     "  <section class=\"card\">\n"
-     "    <h2>Action gate (Spice/Aromatic/Pharmaceutical Crop Governor)</h2>\n"
-     (format (str "    <p class=\"muted\">Computed from <code>spicecrop.governor</code>'s own vars across every phase in "
-                  "<code>spicecrop.phase/all-phases</code> — this table cannot drift from the code. Confidence floor "
-                  "<code>%s</code>; supply orders escalate unless their cost is present, numeric and below "
-                  "<code>%s</code> USD. Anything outside this closed allowlist — above all, finalising a cultivation "
-                  "licence or a diversion-control clearance — is refused permanently and is not overridable by human approval.</p>\n")
-             (esc gov/confidence-floor) (esc gov/supply-order-cost-threshold-usd))
-     "    <table>\n"
-     "      <thead><tr><th>Allowed op</th><th>Auto-commit eligible at</th><th>Needs a human</th><th>High stakes</th></tr></thead>\n"
-     "      <tbody>\n"
-     (str/join "\n" (map gate-row (sort-by name gov/allowed-ops))) "\n"
-     "      </tbody>\n"
-     "    </table>\n"
-     "  </section>\n"
-
-     "  <section class=\"card\">\n"
-     "    <h2>What the governor decided</h2>\n"
-     "    <p class=\"muted\">One row per proposal, in run order. Dispositions, hold rules and their detail text are the governor's own output. No human is in this build: where a row reads <em>signed off</em>, the escalation is the governor's real decision and the sign-off that follows it is scenario input, supplied so the post-commit store state and the double-commit guard can be exercised. This scaffold has no approval path and no store field that could carry an approver, so no approver identity is recorded — the ledger below prints <em>not on record</em> rather than a name.</p>\n"
-     "    <table>\n"
-     "      <thead><tr><th>Op</th><th>Farm-lot</th><th>Disposition</th><th>Rule / cause</th><th>Governor detail</th><th>Scenario</th></tr></thead>\n"
-     "      <tbody>\n"
-     (str/join "\n" (map step-row log)) "\n"
+     (str/join "\n" (hard-rule-rows runs)) "\n"
      "      </tbody>\n"
      "    </table>\n"
      "  </section>\n"
 
      "  <section class=\"card\">\n"
      "    <h2>Audit ledger (this run)</h2>\n"
-     "    <p class=\"muted\">The store's append-only ledger, in order. <code>governor-hold</code> facts are emitted by <code>spicecrop.operation/run-operation</code> itself — red where the basis is non-empty (a hard refusal), amber where it is empty (the scaffold emits the same fact type for a soft escalation). <code>approval-granted</code> and <code>committed</code> facts are appended by the renderer through <code>store/append-fact</code>, because this repo's <code>operation</code> namespace returns <code>:facts []</code> on the clean path and has no commit- or approval-fact function of its own.</p>\n"
+     "    <p class=\"muted\">The append-only fact log held in the store itself (<code>store/audit-trail</code>), "
+     (esc (count ledger)) " facts, of which " (esc (count holds)) " are Governor holds. "
+     "<code>spicecrop.operation</code> routes hard holds and soft escalations through the same "
+     "<code>hold-fact-fn</code>, so an escalation also appears as <code>:governor-hold</code> — with an empty "
+     "basis, since no rule was violated. The two are told apart by the verdict's <code>:hard?</code> flag, "
+     "which is what the timeline above renders.</p>\n"
      "    <table>\n"
-     "      <thead><tr><th>Fact</th><th>Op</th><th>Farm-lot</th><th>Actor</th><th>Disposition</th><th>Basis</th></tr></thead>\n"
+     "      <thead><tr><th>Fact</th><th>Op</th><th>Farm-lot</th><th>Disposition</th><th>Basis</th><th>Approved by</th></tr></thead>\n"
      "      <tbody>\n"
-     (str/join "\n" (map ledger-row ledger)) "\n"
+     (str/join "\n" (map fact-row ledger)) "\n"
      "      </tbody>\n"
      "    </table>\n"
+     "    <p class=\"muted\">The approver is carried on the audit fact only. A farm-lot record in "
+     "<code>spicecrop.store</code> has no approver field, so this console does not claim one holds it.</p>\n"
      "  </section>\n"
 
-     "</main>\n</body></html>\n")))
+     "</main>\n"
+     "<footer>\n"
+     "  <p>cloud-itonami-isic-0128 — regenerate with <code>clojure -M:dev:render-html</code>. "
+     "Deterministic: no timestamp, clock reading or random value reaches this page, so consecutive runs are "
+     "byte-identical.</p>\n"
+     "</footer>\n"
+     "</body></html>\n")))
 
 (defn -main [& args]
   (let [out (or (first args) "docs/samples/operator-console.html")
-        {:keys [db log] :as run} (run-demo!)
-        holds (hard-holds db)]
-    ;; Build-time invariant: a console that shows no hard refusal is not
-    ;; showing this actor's range. Fail the build rather than ship one.
+        {:keys [db runs] :as result} (run-demo!)
+        ledger (store/audit-trail db)
+        holds (filterv #(= :governor-hold (:t %)) ledger)
+        hard-runs (filterv #(= :hard-hold (:outcome %)) runs)
+        html (render result)]
+    ;; A console that shows no Governor hold is not a console for a
+    ;; governed actor -- it is a screenshot of the happy path. Both
+    ;; counts are build-time invariants: if a future change to the
+    ;; scenario, the Governor or the store stops producing holds, this
+    ;; build fails instead of publishing a page that quietly claims
+    ;; everything passed.
     (when (zero? (count holds))
-      (throw (ex-info "no HARD governor holds in the run -- refusing to render a console that hides the actor's refusals"
-                      {:ledger-facts (count (store/audit-trail db))
-                       :steps (count log)})))
-    (io/make-parents out)
-    (spit out (render run))
+      (throw (ex-info "refusing to write an operator console with zero governor holds"
+                      {:ledger-facts (count ledger) :runs (count runs)})))
+    (when (zero? (count hard-runs))
+      (throw (ex-info "refusing to write an operator console with zero HARD governor holds"
+                      {:governor-holds (count holds) :runs (count runs)})))
+    (spit out html)
     (println "wrote" out
-             (str "(" (count (store/audit-trail db)) " ledger facts, "
-                  (count log) " proposals, "
-                  (count holds) " HARD holds, "
-                  (count (filter #(= :auto-commit (:disposition %)) log)) " auto-commits)"))))
+             "(" (count runs) "requests,"
+             (count ledger) "ledger facts,"
+             (count holds) "governor holds,"
+             (count hard-runs) "hard holds,"
+             (count (distinct (map :rule (mapcat :violations runs)))) "distinct hard rules )")))
