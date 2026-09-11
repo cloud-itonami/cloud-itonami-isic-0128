@@ -39,7 +39,7 @@ Security-critical concerns:
 
 All Governor changes must:
 - Have comprehensive test coverage (facts, registry, governor rules)
-- Pass `clojure -M:test` and `clojure -M:lint`
+- Pass `kbb -M:test` and `kbb -M:lint`
 - Include documentation of the spice/aromatic/drug-and-pharmaceutical-crop compliance/regulatory rationale
 - Include regression coverage confirming the advisor's default proposals never self-trip the scope-exclusion check (see `spicecrop.governor-test`)
 

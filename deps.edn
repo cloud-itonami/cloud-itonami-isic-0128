@@ -14,7 +14,7 @@
         io.github.kotoba-lang/langgraph
         {:local/root "../../kotoba-lang/langgraph"}}}
   :run {:main-opts ["-m" "spicecrop.sim"]}
-  ;; clojure -M:dev:render-html [out-file] -> regenerate
+  ;; kbb -M:dev:render-html [out-file] -> regenerate
   ;; docs/samples/operator-console.html by driving the real
   ;; operation -> governor -> store path (flagship checklist item 2).
   :render-html {:main-opts ["-m" "spicecrop.render-html"]}
