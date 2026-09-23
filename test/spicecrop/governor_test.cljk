@@ -1,5 +1,5 @@
 (ns spicecrop.governor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [spicecrop.advisor :as advisor]
             [spicecrop.governor :as governor]))
 
