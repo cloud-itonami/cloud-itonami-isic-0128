@@ -1,5 +1,5 @@
 (ns spicecrop.registry-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [spicecrop.registry :as registry]))
 
 ;; ──────────────────────── Cultivation License ──────────────────────

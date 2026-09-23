@@ -1,5 +1,5 @@
 (ns spicecrop.store-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [spicecrop.store :as store]))
 
 ;; ──────────────────────── Farm-Lot Retrieval ──────────────────────
