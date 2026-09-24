@@ -34,7 +34,7 @@
       genuine cultivation-license expiry, a quota-tracking
       reconciliation freshness requirement, and a licensed-quota ceiling
       the reported harvest must not exceed."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as set]))
 
 (def crop-categories
   "Valid spice/aromatic/drug-and-pharmaceutical crop categories and their
